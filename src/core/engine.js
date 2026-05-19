@@ -28,7 +28,7 @@ const { IdentityAnchor } = require('./identity');
 const { ReasoningVerifier } = require('./verifier');
 const { MeaningfulMemory } = require('./memory');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const BUILD_DATE = '2026-05-20';
 
 class Engine {
