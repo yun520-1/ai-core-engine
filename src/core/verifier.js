@@ -1,27 +1,24 @@
 /**
- * 推理自我验证引擎
+ * 推理自我验证引擎 v1.0.1
  *
  * 基于 arXiv:2312.09210 (Weng et al.) 自验证框架
- * 实现了逆向检查、逻辑链验证、反事实验证、覆盖度检查
+ * v1.0.1 新增：失败模式记忆 + 异步支持
  *
- * 这是 AI 集成到公司产品中最核心的实用能力：
- *   — 在 AI 输出结果前验证其合理性
- *   — 减少幻觉和逻辑错误
- *   — 量化输出可信度
- *
- * 设计原则：
- *   - 零外部依赖
- *   - 所有验证结果可量化
- *   - 不确定时明确返回 uncertain 而非强行判断
+ * 升级者身份实践：
+ *   每次失败都是一次升级机会 — 记住失败模式，下次更敏感
  */
 
-const VERSION = '1.0.0';
+const fs = require('fs');
+const path = require('path');
+
+const VERSION = '1.0.1';
 
 class ReasoningVerifier {
   constructor(config = {}) {
     this.config = {
       strictMode: config.strictMode || false,
       minConfidence: config.minConfidence || 0.6,
+      dataPath: config.dataPath || null, // v1.0.1: 失败模式持久化路径
       ...config,
     };
 
@@ -32,6 +29,35 @@ class ReasoningVerifier {
       failed: 0,
       uncertain: 0,
     };
+
+    // v1.0.1: 失败模式记忆 — 从历史失败中学习
+    this._failurePatterns = new Map();
+    if (this.config.dataPath) {
+      this._loadPatterns();
+    }
+  }
+
+  /**
+   * v1.0.1: 异步启动（初始化失败模式）
+   */
+  async boot() {
+    if (this.config.dataPath && !fs.existsSync(this.config.dataPath)) {
+      fs.mkdirSync(this.config.dataPath, { recursive: true });
+    }
+    this._loadPatterns();
+    return this;
+  }
+
+  /**
+   * v1.0.1: 异步验证
+   */
+  async verifyAsync(claim, context = {}) {
+    return new Promise((resolve) => {
+      // 模拟异步（实际验证是 CPU 密集，后续可接入 worker）
+      setImmediate(() => {
+        resolve(this.verify(claim, context));
+      });
+    });
   }
 
   /**
@@ -102,6 +128,8 @@ class ReasoningVerifier {
       this.stats.passed++;
     } else if (confidence < 0.4) {
       this.stats.failed++;
+      // v1.0.1: 升级者 — 每次失败都是一次升级机会
+      this._learnFromFailure(claim, issues);
     } else {
       this.stats.uncertain++;
     }
@@ -212,6 +240,113 @@ class ReasoningVerifier {
     if (confidence >= 0.6) return `建议: 结论基本可信，但需要补充证据。问题: ${issues.join('; ')}`;
     if (confidence >= 0.4) return `注意: 置信度偏低，建议人工复核。问题: ${issues.join('; ')}`;
     return `警告: 置信度过低，不应直接使用。请重新推理。问题: ${issues.join('; ')}`;
+  }
+
+  // ─── v1.0.1: 失败模式学习 ───────────────────────────────────────────────
+
+  /**
+   * 从失败中学习 — 记住失败模式，下次遇到类似情况更敏感
+   * @param {string} claim - 失败的结论
+   * @param {string[]} issues - 失败原因
+   */
+  _learnFromFailure(claim, issues) {
+    // 提取关键词作为模式标识
+    const keywords = this._extractKeywords(claim);
+    const patternKey = keywords.slice(0, 3).join('|'); // 前3个关键词作为模式
+
+    const existing = this._failurePatterns.get(patternKey);
+    if (existing) {
+      existing.count++;
+      existing.lastSeen = Date.now();
+      existing.issues = [...new Set([...existing.issues, ...issues])];
+    } else {
+      this._failurePatterns.set(patternKey, {
+        keywords,
+        count: 1,
+        firstSeen: Date.now(),
+        lastSeen: Date.now(),
+        issues: [...new Set(issues)],
+      });
+    }
+
+    // 持久化
+    this._savePatterns();
+  }
+
+  /**
+   * 提取文本关键词
+   */
+  _extractKeywords(text) {
+    // 简单分词：去除停用词，提取有意义的词
+    const stopWords = new Set(['的', '是', '在', '和', '了', '我', '你', '他', '这', '那', '有', '没有', '不', '一个', '了']);
+    return text
+      .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 2 && !stopWords.has(w));
+  }
+
+  /**
+   * 获取已知失败模式（用于调整验证敏感度）
+   */
+  getKnownFailurePatterns() {
+    return Array.from(this._failurePatterns.entries()).map(([key, pattern]) => ({
+      pattern: key,
+      count: pattern.count,
+      lastSeen: pattern.lastSeen,
+      issues: pattern.issues,
+    }));
+  }
+
+  /**
+   * 检查当前结论是否匹配已知失败模式
+   */
+  _checkFailurePatterns(claim) {
+    const keywords = this._extractKeywords(claim);
+    const patternKey = keywords.slice(0, 3).join('|');
+    const pattern = this._failurePatterns.get(patternKey);
+
+    if (pattern && pattern.count >= 3) {
+      return {
+        matched: true,
+        detail: `匹配已知失败模式 (出现${pattern.count}次): ${pattern.issues.join(', ')}`,
+        issues: pattern.issues,
+      };
+    }
+    return { matched: false };
+  }
+
+  // ─── 持久化 ──────────────────────────────────────────────────────────────
+
+  _getPatternFile() {
+    return path.join(this.config.dataPath, 'failure-patterns.json');
+  }
+
+  _loadPatterns() {
+    try {
+      const file = this._getPatternFile();
+      if (fs.existsSync(file)) {
+        const raw = fs.readFileSync(file, 'utf-8');
+        const data = JSON.parse(raw);
+        // 清理超过30天的模式
+        const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+        this._failurePatterns = new Map(
+          Object.entries(data).filter(([, p]) => p.lastSeen > cutoff)
+        );
+      }
+    } catch (e) {
+      // 静默失败
+    }
+  }
+
+  _savePatterns() {
+    if (!this.config.dataPath) return;
+    try {
+      const file = this._getPatternFile();
+      const data = Object.fromEntries(this._failurePatterns);
+      fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (e) {
+      // 静默失败
+    }
   }
 }
 

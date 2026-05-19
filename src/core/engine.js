@@ -70,6 +70,7 @@ class Engine {
     this.verifier = new ReasoningVerifier({
       strictMode: this.config.strictMode,
       minConfidence: this.config.minConfidence,
+      dataPath: path.join(this.config.rootPath, 'data'), // v1.0.1: 失败模式持久化
     });
 
     // 启动时写入核心身份到记忆
